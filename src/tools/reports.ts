@@ -16,6 +16,7 @@ import {
   buildExportCollectionEnvelope,
   buildExportObjectEnvelope,
   parseTallyXml,
+  escapeXml,
 } from "../tally/xml.js";
 import { amount, asArray, n, s, toCsv } from "../tally/util.js";
 import type { Tool, ToolHandler } from "./types.js";
@@ -57,8 +58,8 @@ async function fetchLedgerCollection(
       <TYPE>Ledger</TYPE>
       <NATIVEMETHOD>Name</NATIVEMETHOD>
       <NATIVEMETHOD>Parent</NATIVEMETHOD>
-      <NATIVEMETHOD>OpeningBalance</NATIVEMETHOD>
-      <NATIVEMETHOD>ClosingBalance</NATIVEMETHOD>
+      <COMPUTE>OpeningBalance: $OpeningBalance</COMPUTE>
+      <COMPUTE>ClosingBalance: $ClosingBalance</COMPUTE>
       ${filter ? `<FILTERS>MCPFilter</FILTERS>` : ""}
     </COLLECTION>
     ${filter ? `<SYSTEM TYPE="Formulae" NAME="MCPFilter">${filter}</SYSTEM>` : ""}`;
@@ -164,6 +165,7 @@ const ledgerBalance: ToolHandler = async (raw, client) => {
   const body = await client.send(xml);
   const tree = parseTallyXml(body);
   const obj =
+    tree?.ENVELOPE?.BODY?.DATA?.TALLYMESSAGE?.LEDGER ??
     tree?.ENVELOPE?.BODY?.DATA?.LEDGER ??
     tree?.ENVELOPE?.BODY?.DATA ??
     {};
@@ -193,36 +195,66 @@ const ledgerStatementSchema = z.object({
 
 const ledgerStatement: ToolHandler = async (raw, client) => {
   const args = ledgerStatementSchema.parse(raw);
-  // Use the "Ledger Vouchers" report ID with LedgerName static variable.
-  const xml = buildExportEnvelope({
-    reportId: "Ledger Vouchers",
-    staticVariables: {
-      company: args.targetCompany ?? client.config.defaultCompany,
-      fromDate: args.fromDate,
-      toDate: args.toDate,
-      extra: { LedgerName: args.ledgerName },
-    },
+  const company = args.targetCompany ?? client.config.defaultCompany;
+
+  // Build a Voucher collection filtered to entries that involve this ledger.
+  // $$IsLedgerUsed:<LedgerEntries collection>:<ledger name> is a Tally TDL
+  // function that returns TRUE when the named ledger appears in the voucher.
+  const ledgerNameEsc = escapeXml(args.ledgerName);
+
+  const collectionName = "MCP_LedgerAccount";
+  // WALK into AllLedgerEntries so each row is one ledger-entry line.
+  // Tally merges parent Voucher fields (Date/VoucherTypeName/VoucherNumber/Narration)
+  // into the row automatically, giving us the full account statement.
+  const tdl = `
+    <COLLECTION NAME="${collectionName}" ISMODIFY="No">
+      <TYPE>Voucher</TYPE>
+      <WALK>AllLedgerEntries</WALK>
+      <NATIVEMETHOD>Date</NATIVEMETHOD>
+      <NATIVEMETHOD>VoucherTypeName</NATIVEMETHOD>
+      <NATIVEMETHOD>VoucherNumber</NATIVEMETHOD>
+      <NATIVEMETHOD>Narration</NATIVEMETHOD>
+      <NATIVEMETHOD>LedgerName</NATIVEMETHOD>
+      <NATIVEMETHOD>Amount</NATIVEMETHOD>
+      <NATIVEMETHOD>IsDeemedPositive</NATIVEMETHOD>
+      <NATIVEMETHOD>IsCancelled</NATIVEMETHOD>
+      <FILTERS>MCPLedgerFilter</FILTERS>
+    </COLLECTION>
+    <SYSTEM TYPE="Formulae" NAME="MCPLedgerFilter">$LedgerName = "${ledgerNameEsc}"</SYSTEM>`;
+
+  const xml = buildExportCollectionEnvelope({
+    collectionName,
+    staticVariables: { company, fromDate: args.fromDate, toDate: args.toDate },
+    tdlMessage: tdl,
   });
   const body = await client.send(xml);
   const tree = parseTallyXml(body);
-  const data = tree?.ENVELOPE?.BODY?.DATA ?? {};
-  // Vouchers can sit under various wrappers depending on Tally version.
   const vouchers = asArray<any>(
-    data?.COLLECTION?.VOUCHER ??
-    data?.VOUCHER ??
-    data?.TALLYMESSAGE?.VOUCHER ??
-    []
+    tree?.ENVELOPE?.BODY?.DATA?.COLLECTION?.VOUCHER ?? []
   );
-  const rows = vouchers.map((v: any) => [
-    s(v?.DATE ?? ""),
-    s(v?.VOUCHERTYPENAME ?? v?.["@_VCHTYPE"] ?? ""),
-    s(v?.VOUCHERNUMBER ?? ""),
-    s(v?.PARTYLEDGERNAME ?? v?.PARTYNAME ?? ""),
-    amount(v?.AMOUNT ?? 0).toFixed(2),
-    s(v?.NARRATION ?? ""),
-  ]);
+
+  // If no structured COLLECTION/VOUCHER found, return raw XML so the caller
+  // can inspect the actual response and we can iterate on the filter formula.
+  if (vouchers.length === 0) {
+    return body;
+  }
+
+  const rows = vouchers
+    .filter((v: any) => s(v?.ISCANCELLED ?? "").toLowerCase() !== "yes")
+    .map((v: any) => {
+      // IsDeemedPositive = "Yes" means Debit for the ledger.
+      const isDr = s(v?.ISDEEMEDPOSITIVE ?? "").toLowerCase() === "yes";
+      return [
+        s(v?.DATE ?? ""),
+        s(v?.VOUCHERTYPENAME ?? v?.["@_VCHTYPE"] ?? ""),
+        s(v?.VOUCHERNUMBER ?? ""),
+        Math.abs(amount(v?.AMOUNT ?? 0)).toFixed(2),
+        isDr ? "Dr" : "Cr",
+        s(v?.NARRATION ?? ""),
+      ];
+    });
   return toCsv(
-    ["date", "voucher_type", "voucher_number", "party_ledger", "amount", "narration"],
+    ["date", "voucher_type", "voucher_number", "amount", "dr_cr", "narration"],
     rows
   );
 };
@@ -432,14 +464,16 @@ const chartOfAccounts: ToolHandler = async (raw, client) => {
     tree?.ENVELOPE?.BODY?.DATA?.COLLECTION?.GROUP ?? []
   );
   const rows = groups.map((g) => {
-    const isRevenue = String(g?.ISREVENUE ?? "").toLowerCase() === "yes";
-    const isDeemedPositive = String(g?.ISDEEMEDPOSITIVE ?? "").toLowerCase() === "yes";
+    // Use s() not String() — Tally returns TYPE="Logical" attributes which fast-xml-parser
+    // wraps as {"#text":"Yes","@_TYPE":"Logical"}. s() correctly extracts #text.
+    const isRevenue = s(g?.ISREVENUE ?? "").toLowerCase() === "yes";
+    const isDeemedPositive = s(g?.ISDEEMEDPOSITIVE ?? "").toLowerCase() === "yes";
     return [
       s(g?.["@_NAME"] ?? g?.NAME ?? ""),
       s(g?.PARENT ?? ""),
       isRevenue ? "PL" : "BS",
       isDeemedPositive ? "D" : "C",
-      String(g?.AFFECTSGROSSPROFIT ?? "").toLowerCase() === "yes" ? "Y" : "N",
+      s(g?.AFFECTSGROSSPROFIT ?? "").toLowerCase() === "yes" ? "Y" : "N",
     ];
   });
   return toCsv(["group", "parent", "bs_pl", "dr_cr", "affects_gross_profit"], rows);

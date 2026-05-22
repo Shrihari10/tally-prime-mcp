@@ -9,7 +9,6 @@ import { z } from "zod";
 import { TallyClient } from "../tally/client.js";
 import {
   buildImportEnvelope,
-  buildExportEnvelope,
   buildExportCollectionEnvelope,
   buildExportObjectEnvelope,
   escapeXml,
@@ -96,17 +95,26 @@ const listMasters: ToolHandler = async (raw, client) => {
 const listCompaniesSchema = z.object({});
 
 const listCompanies: ToolHandler = async (_raw, client) => {
-  const xml = buildExportEnvelope({
-    reportId: "List of Companies",
+  // "List of Companies" report does not exist in Tally Prime 6.0 — use a TDL collection instead.
+  const collectionName = "MCP_Company_List";
+  const tdl = `
+    <COLLECTION NAME="${collectionName}" ISMODIFY="No">
+      <TYPE>Company</TYPE>
+      <NATIVEMETHOD>Name</NATIVEMETHOD>
+      <NATIVEMETHOD>StartingFrom</NATIVEMETHOD>
+      <NATIVEMETHOD>EndingAt</NATIVEMETHOD>
+    </COLLECTION>`;
+  const xml = buildExportCollectionEnvelope({
+    collectionName,
     staticVariables: {},
+    tdlMessage: tdl,
   });
   const body = await client.send(xml);
-  // The "List of Companies" response is plain text inside <COMPANY> nodes.
   const tree = parseTallyXml(body);
-  const data = tree?.ENVELOPE?.BODY?.DATA ?? {};
-  const companies = asArray<any>(data?.COLLECTION?.COMPANY ?? data?.COMPANY);
+  const data = tree?.ENVELOPE?.BODY?.DATA ?? tree?.ENVELOPE ?? {};
+  const companies = asArray<any>(data?.COLLECTION?.COMPANY);
   const rows = companies.map((c) => [
-    s(c?.["@_NAME"] ?? c?.NAME ?? c ?? ""),
+    s(c?.["@_NAME"] ?? c?.NAME ?? ""),
     s(c?.STARTINGFROM ?? ""),
     s(c?.ENDINGAT ?? ""),
   ]);

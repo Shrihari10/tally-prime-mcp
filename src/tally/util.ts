@@ -3,7 +3,12 @@
 /** Coerce any Tally value (which may already be a Number/Boolean from the parser) to a string. */
 export function s(v: unknown): string {
   if (v === null || v === undefined) return "";
-  if (typeof v === "object") return JSON.stringify(v);
+  if (typeof v === "object") {
+    // fast-xml-parser wraps tagged values as {"#text": value, "@_TYPE": "..."} when attributes are present
+    const obj = v as Record<string, unknown>;
+    if ("#text" in obj) return String(obj["#text"]);
+    return JSON.stringify(v);
+  }
   return String(v);
 }
 
@@ -21,6 +26,12 @@ export function n(v: unknown): number {
  */
 export function amount(v: unknown): number {
   if (v === null || v === undefined) return 0;
+  // fast-xml-parser wraps tagged values as {"#text": value, "@_TYPE": "Amount"} when attributes present
+  if (typeof v === "object") {
+    const obj = v as Record<string, unknown>;
+    if ("#text" in obj) return amount(obj["#text"]);
+    return 0;
+  }
   const raw = String(v).trim();
   if (!raw) return 0;
   const isCr = /\bCr\b/i.test(raw);

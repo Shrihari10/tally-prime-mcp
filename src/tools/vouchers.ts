@@ -9,7 +9,7 @@
 import { z } from "zod";
 import {
   buildImportEnvelope,
-  buildExportObjectEnvelope,
+  buildExportCollectionEnvelope,
   escapeXml,
   parseImportResult,
   tallyDate,
@@ -280,16 +280,38 @@ const getVoucherSchema = z.object({
 
 const getVoucher: ToolHandler = async (raw, client) => {
   const args = getVoucherSchema.parse(raw);
-  const xml = buildExportObjectEnvelope({
-    subType: "Voucher",
-    id: args.voucherNumber,
-    idType: "Name",
-    staticVariables: { company: args.targetCompany ?? client.config.defaultCompany },
-    fetchList: [
-      "Date", "VoucherTypeName", "VoucherNumber", "Reference",
-      "Narration", "PartyLedgerName", "Amount",
-      "AllLedgerEntries", "AllInventoryEntries",
-    ],
+  const company = args.targetCompany ?? client.config.defaultCompany;
+
+  // Object export for Vouchers by VoucherNumber doesn't work in Tally Prime 6.0
+  // (error: "Could not find Voucher:<num>!"). Use a Voucher collection filtered
+  // by $VoucherNumber instead — this reliably returns the full voucher XML.
+  const vchNumEsc = escapeXml(args.voucherNumber);
+  const typeClause = args.voucherType
+    ? ` AND $VoucherTypeName = "${escapeXml(args.voucherType)}"`
+    : "";
+  const collectionName = "MCP_GetVoucher";
+  // Specifying at least some NATIVEMETHODs on a Voucher collection causes Tally
+  // to include the full ALLLEDGERENTRIES / ALLINVENTORYENTRIES child data.
+  const tdl = `
+    <COLLECTION NAME="${collectionName}" ISMODIFY="No">
+      <TYPE>Voucher</TYPE>
+      <NATIVEMETHOD>Date</NATIVEMETHOD>
+      <NATIVEMETHOD>VoucherTypeName</NATIVEMETHOD>
+      <NATIVEMETHOD>VoucherNumber</NATIVEMETHOD>
+      <NATIVEMETHOD>Reference</NATIVEMETHOD>
+      <NATIVEMETHOD>Narration</NATIVEMETHOD>
+      <NATIVEMETHOD>PartyLedgerName</NATIVEMETHOD>
+      <NATIVEMETHOD>Amount</NATIVEMETHOD>
+      <NATIVEMETHOD>IsCancelled</NATIVEMETHOD>
+      <FILTERS>MCPVchFilt</FILTERS>
+    </COLLECTION>
+    <SYSTEM TYPE="Formulae" NAME="MCPVchFilt">$VoucherNumber = "${vchNumEsc}"${typeClause}</SYSTEM>`;
+
+  const xml = buildExportCollectionEnvelope({
+    collectionName,
+    // No date range — search across the full company data.
+    staticVariables: { company },
+    tdlMessage: tdl,
   });
   return await client.send(xml);
 };

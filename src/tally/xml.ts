@@ -262,7 +262,8 @@ export function parseImportResult(xml: string): ImportResult {
   const tree = parser.parse(xml);
   const env = tree?.ENVELOPE ?? tree;
   const resp =
-    env?.BODY?.DATA?.RESPONSE ??
+    env?.BODY?.DATA?.IMPORTRESULT ??   // Tally Prime 6.0 uses IMPORTRESULT
+    env?.BODY?.DATA?.RESPONSE ??       // older / alternate format
     env?.RESPONSE ??
     env?.BODY?.DATA ??
     {};
