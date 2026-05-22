@@ -1,0 +1,47 @@
+{
+  "name": "tally-prime-mcp",
+  "version": "0.1.0",
+  "description": "Tally Prime MCP server — exposes Tally Prime XML/HTTP gateway (port 9000) as Model Context Protocol tools for Claude Cowork, Claude Desktop, and other MCP clients.",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "tally-prime-mcp": "bootstrap.cjs"
+  },
+  "files": [
+    "dist",
+    "bootstrap.cjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node bootstrap.cjs",
+    "dev": "tsc -w -p tsconfig.json",
+    "clean": "rm -rf dist",
+    "prepare": "npm run build"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "tally",
+    "tally-prime",
+    "mcp",
+    "model-context-protocol",
+    "accounting",
+    "erp",
+    "claude",
+    "xml"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "fast-xml-parser": "^4.5.0",
+    "undici": "^6.21.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0"
+  }
+}
