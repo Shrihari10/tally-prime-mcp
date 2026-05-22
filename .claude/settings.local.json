@@ -1,0 +1,37 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__Tally_Prime_MCP__tally_list_companies",
+      "mcp__Tally_Prime_MCP__tally_list_masters",
+      "mcp__Tally_Prime_MCP__tally_chart_of_accounts",
+      "mcp__Tally_Prime_MCP__tally_balance_sheet",
+      "mcp__Tally_Prime_MCP__tally_trial_balance",
+      "mcp__Tally_Prime_MCP__tally_profit_loss",
+      "mcp__Tally_Prime_MCP__tally_day_book",
+      "mcp__Tally_Prime_MCP__tally_raw_request",
+      "Bash(npm run *)",
+      "PowerShell(.\\\\node_modules\\\\.bin\\\\tsc.cmd -p tsconfig.json 2>&1)",
+      "Bash(cat \"C:/Users/Admin/AppData/Roaming/Claude/claude_desktop_config.json\" 2>/dev/null || echo \"NOT FOUND\")",
+      "mcp__Tally_Prime_MCP__tally_get_ledger",
+      "mcp__Tally_Prime_MCP__tally_ledger_balance",
+      "mcp__Tally_Prime_MCP__tally_ledger_account",
+      "mcp__Tally_Prime_MCP__tally_stock_summary",
+      "mcp__Tally_Prime_MCP__tally_bills_outstanding",
+      "mcp__Tally_Prime_MCP__tally_ledger_outstanding",
+      "mcp__Tally_Prime_MCP__tally_stock_item_balance",
+      "mcp__Tally_Prime_MCP__tally_stock_item_account",
+      "Bash(node -e \"const r=require\\('./dist/tools/reports.js'\\);console.log\\('reports loaded ok'\\)\")",
+      "mcp__Tally_Prime_MCP__tally_get_voucher",
+      "mcp__Tally_Prime_MCP__tally_create_group",
+      "mcp__Tally_Prime_MCP__tally_create_unit",
+      "mcp__Tally_Prime_MCP__tally_create_stock_group",
+      "mcp__Tally_Prime_MCP__tally_create_godown",
+      "mcp__Tally_Prime_MCP__tally_create_cost_centre",
+      "mcp__Tally_Prime_MCP__tally_create_ledger",
+      "mcp__Tally_Prime_MCP__tally_create_stock_item",
+      "mcp__Tally_Prime_MCP__tally_create_voucher",
+      "mcp__Tally_Prime_MCP__tally_alter_voucher",
+      "mcp__Tally_Prime_MCP__tally_cancel_voucher"
+    ]
+  }
+}

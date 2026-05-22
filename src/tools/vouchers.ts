@@ -57,25 +57,37 @@ export const inventoryEntrySchema = z.object({
 
 export const voucherSchema = z.object({
   voucherType: z.string().min(1).describe(
-    "Voucher Type name — Sales, Purchase, Receipt, Payment, Journal, Contra, Stock Journal, Debit Note, Credit Note, or any custom type."
+    "Voucher Type name — Sales, Purchase, Receipt, Payment, Journal, Contra, Stock Journal, " +
+    "Debit Note, Credit Note, Sales Order, Purchase Order, or any custom type."
   ),
   date: z.string().describe("Voucher date (YYYY-MM-DD, DD-MM-YYYY, or YYYYMMDD)."),
   voucherNumber: z.string().optional(),
-  reference: z.string().optional(),
+  reference: z.string().optional().describe(
+    "Reference / customer PO number. Required for Sales Order and Purchase Order — " +
+    "used as the order reference in Tally. Defaults to the voucher date if omitted for order types."
+  ),
   narration: z.string().optional(),
   partyLedger: z.string().optional().describe(
-    "Party ledger for the voucher header (used by Sales/Purchase/Receipt/Payment)."
+    "Party ledger for the voucher header (used by Sales/Purchase/Receipt/Payment/Orders)."
   ),
   isInvoice: z.boolean().optional().describe(
-    "True for accounting/item invoice mode; false for voucher mode (default false)."
+    "True for accounting/item invoice mode; false for voucher mode. " +
+    "Sales Order and Purchase Order always use false regardless of this flag."
   ),
   view: z.enum([
     "Accounting Voucher View",
     "Invoice Voucher View",
     "Inventory Voucher View",
-  ]).optional(),
+    "Order Voucher View",
+  ]).optional().describe(
+    "Tally persisted view. Auto-detected from voucherType when omitted: " +
+    "Sales Order / Purchase Order → Invoice Voucher View; " +
+    "isInvoice:true → Invoice Voucher View; otherwise Accounting Voucher View."
+  ),
   ledgerEntries: z.array(ledgerEntrySchema).min(1).describe(
-    "Debit/Credit lines. Negative amount = Debit, positive amount = Credit. Total must net to zero."
+    "Debit/Credit lines. Negative amount = Debit, positive amount = Credit. " +
+    "For order/invoice vouchers with inventory, only the party ledger line is required here; " +
+    "the sales/purchase ledger lives inside inventoryEntries[].accountingLedger."
   ),
   inventoryEntries: z.array(inventoryEntrySchema).optional(),
   targetCompany: z.string().optional(),
@@ -118,7 +130,15 @@ function renderLedgerEntry(e: LedgerEntry): string {
     </ALLLEDGERENTRIES.LIST>`;
 }
 
-function renderInventoryEntry(i: InventoryEntry): string {
+/** Extra context injected by renderVoucher for order-type vouchers. */
+interface InvEntryContext {
+  /** Customer's order/PO reference — required for Sales Order / Purchase Order. */
+  orderNo?: string;
+  /** Delivery / due date for the order line (YYYYMMDD). */
+  orderDueDate?: string;
+}
+
+function renderInventoryEntry(i: InventoryEntry, ctx?: InvEntryContext): string {
   const unit = i.unit ?? "nos";
   const isDeemed = i.isDeemedPositive ?? false;
   const rateBlock = i.rate !== undefined
@@ -129,6 +149,8 @@ function renderInventoryEntry(i: InventoryEntry): string {
       <GODOWNNAME>${escapeXml(i.godown ?? "Main Location")}</GODOWNNAME>
       <BATCHNAME>${escapeXml(i.batch ?? "Primary Batch")}</BATCHNAME>
       ${i.destinationGodown ? `<DESTINATIONGODOWNNAME>${escapeXml(i.destinationGodown)}</DESTINATIONGODOWNNAME>` : ""}
+      ${ctx?.orderNo ? `<ORDERNO>${escapeXml(ctx.orderNo)}</ORDERNO>` : ""}
+      ${ctx?.orderDueDate ? `<ORDERDUEDATE>${tallyDate(ctx.orderDueDate)}</ORDERDUEDATE>` : ""}
       <AMOUNT>${i.amount.toFixed(2)}</AMOUNT>
       <ACTUALQTY>${i.quantity} ${escapeXml(unit)}</ACTUALQTY>
       <BILLEDQTY>${i.quantity} ${escapeXml(unit)}</BILLEDQTY>
@@ -153,14 +175,36 @@ function renderInventoryEntry(i: InventoryEntry): string {
     </ALLINVENTORYENTRIES.LIST>`;
 }
 
+/** Voucher types that are Order-class in Tally — they use Invoice Voucher View but ISINVOICE=No. */
+const ORDER_VOUCHER_TYPES = new Set([
+  "Sales Order", "Purchase Order",
+  "Job Work In Order", "Job Work Out Order",
+]);
+
 function renderVoucher(args: VoucherInput): string {
-  // Default view based on isInvoice
+  const isOrderType = ORDER_VOUCHER_TYPES.has(args.voucherType);
+
+  // Auto-detect the persisted view:
+  //  - Caller override always wins
+  //  - Order vouchers (Sales Order / Purchase Order) → Invoice Voucher View
+  //  - isInvoice:true → Invoice Voucher View
+  //  - Otherwise → Accounting Voucher View
   const view = args.view
-    ?? (args.isInvoice ? "Invoice Voucher View" : "Accounting Voucher View");
-  const isInvoice = args.isInvoice ?? view === "Invoice Voucher View";
+    ?? (isOrderType ? "Invoice Voucher View"
+      : args.isInvoice ? "Invoice Voucher View"
+      : "Accounting Voucher View");
+
+  // ISINVOICE controls whether Tally treats the entry as an invoice.
+  // Order vouchers always use "No" even though their view is "Invoice Voucher View".
+  const isInvoice = isOrderType ? false : (args.isInvoice ?? view === "Invoice Voucher View");
 
   const ledgerXml = args.ledgerEntries.map(renderLedgerEntry).join("");
-  const invXml = (args.inventoryEntries ?? []).map(renderInventoryEntry).join("");
+  // For order-type vouchers, pass ORDERNO (= voucher reference) and ORDERDUEDATE (= voucher date)
+  // into each batch allocation — Tally requires a non-empty ORDERNO for Sales/Purchase Orders.
+  const invCtx: InvEntryContext | undefined = isOrderType
+    ? { orderNo: args.reference || tallyDate(args.date), orderDueDate: args.date }
+    : undefined;
+  const invXml = (args.inventoryEntries ?? []).map((i) => renderInventoryEntry(i, invCtx ?? undefined)).join("");
 
   return `
     <TALLYMESSAGE xmlns:UDF="TallyUDF">
@@ -188,11 +232,19 @@ const createVoucher: ToolHandler = async (raw, client) => {
   const args = voucherSchema.parse(raw);
 
   // Sanity-check that debits and credits balance (to within 0.01).
-  const total = args.ledgerEntries.reduce((sum, e) => sum + e.amount, 0);
+  // For invoice/order vouchers the sales or purchase ledger lives inside
+  // inventoryEntries[].accountingLedger rather than in ledgerEntries, so
+  // include those accounting-allocation amounts in the net check.
+  const ledgerNet = args.ledgerEntries.reduce((sum, e) => sum + e.amount, 0);
+  const invAccNet = (args.inventoryEntries ?? []).reduce(
+    (sum, i) => (i.accountingLedger !== undefined ? sum + i.amount : sum), 0
+  );
+  const total = ledgerNet + invAccNet;
   if (Math.abs(total) > 0.01) {
     throw new Error(
-      `Voucher ledger entries do not balance: net = ${total.toFixed(2)}. ` +
-        `Negative amounts are Debits, positive are Credits — they must sum to zero.`
+      `Voucher entries do not balance: net = ${total.toFixed(2)}. ` +
+        `Negative amounts are Debits, positive are Credits — combined ledger entries ` +
+        `and inventory accounting allocations must sum to zero.`
     );
   }
 
@@ -207,6 +259,13 @@ const createVoucher: ToolHandler = async (raw, client) => {
     throw new Error(
       `Tally rejected the voucher: ${result.lineError ?? "see raw response"}\n\n${body}`
     );
+  }
+  // For order-type vouchers (Sales Order / Purchase Order) Tally Prime 6.0
+  // places the import count in the EXCEPTIONS field instead of CREATED.
+  // Treat exceptions > 0 (and no lineError) as a successful creation.
+  if (result.created === 0 && result.altered === 0 && result.exceptions === 0) {
+    // Nothing was created, altered, or excepted — surface the raw response.
+    return JSON.stringify({ ...result, warning: "Tally reported 0 created/altered/exceptions — check raw response." }, null, 2);
   }
   return JSON.stringify(result, null, 2);
 };
@@ -228,7 +287,7 @@ const alterVoucher: ToolHandler = async (raw, client) => {
   const inner = [
     args.narration ? `<NARRATION>${escapeXml(args.narration)}</NARRATION>` : "",
     (args.newLedgerEntries ?? []).map(renderLedgerEntry).join(""),
-    (args.newInventoryEntries ?? []).map(renderInventoryEntry).join(""),
+    (args.newInventoryEntries ?? []).map((i) => renderInventoryEntry(i)).join(""),
   ].join("");
   const body = `
     <TALLYMESSAGE xmlns:UDF="TallyUDF">
@@ -322,7 +381,11 @@ export const voucherTools: Tool[] = [
   {
     name: "tally_create_voucher",
     description:
-      "Post a voucher (Sales, Purchase, Receipt, Payment, Journal, Contra, Stock Journal, Debit Note, Credit Note, or any custom type). Ledger entries use signed amounts: NEGATIVE = Debit, POSITIVE = Credit, and the lines must net to zero. For an invoice-style sales/purchase, set isInvoice:true and include inventoryEntries with accountingLedger.",
+      "Post a voucher (Sales, Purchase, Receipt, Payment, Journal, Contra, Stock Journal, Debit Note, Credit Note, Sales Order, Purchase Order, or any custom type). " +
+      "Ledger entries use signed amounts: NEGATIVE = Debit, POSITIVE = Credit. " +
+      "For Sales Order / Purchase Order: set voucherType to 'Sales Order'/'Purchase Order', provide the party ledger in ledgerEntries (negative = Dr for customer), " +
+      "and add inventoryEntries with stockItem/quantity/rate/amount (POSITIVE amounts) and accountingLedger pointing to the sales/purchase ledger. " +
+      "The balance check includes both ledgerEntries and inventoryEntries[].accountingLedger amounts — they must sum to zero together.",
     inputSchema: voucherSchema,
     handler: createVoucher,
   },

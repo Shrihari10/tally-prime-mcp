@@ -251,6 +251,8 @@ export interface ImportResult {
   ignored: number;
   errors: number;
   cancelled: number;
+  /** Order vouchers (Sales Order / Purchase Order) are counted here by Tally Prime 6.0. */
+  exceptions: number;
   lastVchId: number;
   lastMId: number;
   lineError?: string;
@@ -279,6 +281,7 @@ export function parseImportResult(xml: string): ImportResult {
     ignored: Number(resp.IGNORED ?? 0) || 0,
     errors: Number(resp.ERRORS ?? 0) || 0,
     cancelled: Number(resp.CANCELLED ?? 0) || 0,
+    exceptions: Number(resp.EXCEPTIONS ?? 0) || 0,
     lastVchId: Number(resp.LASTVCHID ?? 0) || 0,
     lastMId: Number(resp.LASTMID ?? 0) || 0,
     lineError: lineError ? String(lineError) : undefined,
