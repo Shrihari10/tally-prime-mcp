@@ -44,8 +44,9 @@ export const inventoryEntrySchema = z.object({
   stockItem: z.string().min(1),
   quantity: z.number().describe("Quantity (positive number). Tally infers direction from voucher type."),
   rate: z.number().optional(),
+  discount: z.number().optional().describe("Discount percentage (0–100). Defaults to 0."),
   amount: z.number(),
-  unit: z.string().optional().describe("Unit symbol, e.g. 'nos', 'kg'. Defaults to the item's base unit."),
+  unit: z.string().optional().describe("Unit symbol, e.g. 'No', 'kg'. Defaults to the item's base unit."),
   godown: z.string().optional(),
   batch: z.string().optional(),
   destinationGodown: z.string().optional(),
@@ -101,7 +102,10 @@ type InventoryEntry = z.infer<typeof inventoryEntrySchema>;
 /*  Rendering                                                                 */
 /* -------------------------------------------------------------------------- */
 
-function renderLedgerEntry(e: LedgerEntry): string {
+// tagName: ALLLEDGERENTRIES.LIST for standard vouchers,
+//          LEDGERENTRIES.LIST for Sales/Purchase Order imports (Tally Prime 6 silently discards
+//          ALLLEDGERENTRIES for order-type vouchers and requires LEDGERENTRIES instead).
+function renderLedgerEntry(e: LedgerEntry, tagName = "ALLLEDGERENTRIES.LIST"): string {
   const isDr = e.amount < 0;
   const billLines = (e.billAllocations ?? []).map((b) => `
     <BILLALLOCATIONS.LIST>
@@ -120,14 +124,14 @@ function renderLedgerEntry(e: LedgerEntry): string {
       </CATEGORYALLOCATIONS.LIST>`
     : "";
   return `
-    <ALLLEDGERENTRIES.LIST>
+    <${tagName}>
       <LEDGERNAME>${escapeXml(e.ledger)}</LEDGERNAME>
       <ISDEEMEDPOSITIVE>${isDr ? "Yes" : "No"}</ISDEEMEDPOSITIVE>
-      ${e.isPartyLedger ? "<ISPARTYLEDGER>Yes</ISPARTYLEDGER>" : ""}
+      ${e.isPartyLedger ? "<ISPARTYLEDGER>Yes</ISPARTYLEDGER>" : "<ISPARTYLEDGER>No</ISPARTYLEDGER>"}
       <AMOUNT>${e.amount.toFixed(2)}</AMOUNT>
       ${billLines}
       ${ccLines}
-    </ALLLEDGERENTRIES.LIST>`;
+    </${tagName}>`;
 }
 
 /** Extra context injected by renderVoucher for order-type vouchers. */
@@ -139,15 +143,25 @@ interface InvEntryContext {
 }
 
 function renderInventoryEntry(i: InventoryEntry, ctx?: InvEntryContext): string {
-  const unit = i.unit ?? "nos";
+  const unit = i.unit ?? "No";
   const isDeemed = i.isDeemedPositive ?? false;
+  const discount = i.discount ?? 0;
   const rateBlock = i.rate !== undefined
     ? `<RATE>${i.rate.toFixed(2)}/${escapeXml(unit)}</RATE>`
     : "";
+  // Godown and batch: send empty tags when not specified so Tally uses its defaults
+  // ("Any" godown/batch).  Sending invented names like "Main Location" / "Primary
+  // Batch" causes Tally to silently discard quantity and rate.
+  const godownTag = i.godown
+    ? `<GODOWNNAME>${escapeXml(i.godown)}</GODOWNNAME>`
+    : `<GODOWNNAME/>`;
+  const batchTag = i.batch
+    ? `<BATCHNAME>${escapeXml(i.batch)}</BATCHNAME>`
+    : `<BATCHNAME/>`;
   const batch = `
     <BATCHALLOCATIONS.LIST>
-      <GODOWNNAME>${escapeXml(i.godown ?? "Main Location")}</GODOWNNAME>
-      <BATCHNAME>${escapeXml(i.batch ?? "Primary Batch")}</BATCHNAME>
+      ${godownTag}
+      ${batchTag}
       ${i.destinationGodown ? `<DESTINATIONGODOWNNAME>${escapeXml(i.destinationGodown)}</DESTINATIONGODOWNNAME>` : ""}
       ${ctx?.orderNo ? `<ORDERNO>${escapeXml(ctx.orderNo)}</ORDERNO>` : ""}
       ${ctx?.orderDueDate ? `<ORDERDUEDATE>${tallyDate(ctx.orderDueDate)}</ORDERDUEDATE>` : ""}
@@ -159,6 +173,7 @@ function renderInventoryEntry(i: InventoryEntry, ctx?: InvEntryContext): string 
     ? `<ACCOUNTINGALLOCATIONS.LIST>
         <LEDGERNAME>${escapeXml(i.accountingLedger)}</LEDGERNAME>
         <ISDEEMEDPOSITIVE>${isDeemed ? "Yes" : "No"}</ISDEEMEDPOSITIVE>
+        <ISPARTYLEDGER>No</ISPARTYLEDGER>
         <AMOUNT>${i.amount.toFixed(2)}</AMOUNT>
       </ACCOUNTINGALLOCATIONS.LIST>`
     : "";
@@ -167,6 +182,7 @@ function renderInventoryEntry(i: InventoryEntry, ctx?: InvEntryContext): string 
       <STOCKITEMNAME>${escapeXml(i.stockItem)}</STOCKITEMNAME>
       <ISDEEMEDPOSITIVE>${isDeemed ? "Yes" : "No"}</ISDEEMEDPOSITIVE>
       ${rateBlock}
+      <DISCOUNT>${discount}</DISCOUNT>
       <AMOUNT>${i.amount.toFixed(2)}</AMOUNT>
       <ACTUALQTY>${i.quantity} ${escapeXml(unit)}</ACTUALQTY>
       <BILLEDQTY>${i.quantity} ${escapeXml(unit)}</BILLEDQTY>
@@ -198,7 +214,8 @@ function renderVoucher(args: VoucherInput): string {
   // Order vouchers always use "No" even though their view is "Invoice Voucher View".
   const isInvoice = isOrderType ? false : (args.isInvoice ?? view === "Invoice Voucher View");
 
-  const ledgerXml = args.ledgerEntries.map(renderLedgerEntry).join("");
+  const ledgerTag = isOrderType ? "LEDGERENTRIES.LIST" : "ALLLEDGERENTRIES.LIST";
+  const ledgerXml = args.ledgerEntries.map((e) => renderLedgerEntry(e, ledgerTag)).join("");
   // For order-type vouchers, pass ORDERNO (= voucher reference) and ORDERDUEDATE (= voucher date)
   // into each batch allocation — Tally requires a non-empty ORDERNO for Sales/Purchase Orders.
   const invCtx: InvEntryContext | undefined = isOrderType
@@ -215,11 +232,13 @@ function renderVoucher(args: VoucherInput): string {
         ${args.reference ? `<REFERENCE>${escapeXml(args.reference)}</REFERENCE>` : ""}
         ${args.partyLedger ? `<PARTYLEDGERNAME>${escapeXml(args.partyLedger)}</PARTYLEDGERNAME>` : ""}
         ${args.partyLedger ? `<PARTYNAME>${escapeXml(args.partyLedger)}</PARTYNAME>` : ""}
+        ${args.partyLedger ? `<BASICBUYERNAME>${escapeXml(args.partyLedger)}</BASICBUYERNAME>` : ""}
+        ${args.partyLedger ? `<BASICBASEPARTYNAME>${escapeXml(args.partyLedger)}</BASICBASEPARTYNAME>` : ""}
         <PERSISTEDVIEW>${escapeXml(view)}</PERSISTEDVIEW>
         <ISINVOICE>${isInvoice ? "Yes" : "No"}</ISINVOICE>
         ${args.narration ? `<NARRATION>${escapeXml(args.narration)}</NARRATION>` : ""}
-        ${ledgerXml}
         ${invXml}
+        ${ledgerXml}
       </VOUCHER>
     </TALLYMESSAGE>`;
 }
@@ -286,7 +305,7 @@ const alterVoucher: ToolHandler = async (raw, client) => {
   const args = alterVoucherSchema.parse(raw);
   const inner = [
     args.narration ? `<NARRATION>${escapeXml(args.narration)}</NARRATION>` : "",
-    (args.newLedgerEntries ?? []).map(renderLedgerEntry).join(""),
+    (args.newLedgerEntries ?? []).map((e) => renderLedgerEntry(e)).join(""),
     (args.newInventoryEntries ?? []).map((i) => renderInventoryEntry(i)).join(""),
   ].join("");
   const body = `
@@ -316,7 +335,8 @@ const cancelVoucher: ToolHandler = async (raw, client) => {
   const args = cancelVoucherSchema.parse(raw);
   const body = `
     <TALLYMESSAGE xmlns:UDF="TallyUDF">
-      <VOUCHER DATE="${tallyDate(args.date)}" TAGNAME="VoucherNumber" TAGVALUE="${escapeXml(args.voucherNumber)}" Action="Cancel" VCHTYPE="${escapeXml(args.voucherType)}">
+      <VOUCHER DATE="${tallyDate(args.date)}" TAGNAME="VoucherNumber" TAGVALUE="${escapeXml(args.voucherNumber)}" Action="Alter" VCHTYPE="${escapeXml(args.voucherType)}">
+        <ISCANCELLED>Yes</ISCANCELLED>
         ${args.narration ? `<NARRATION>${escapeXml(args.narration)}</NARRATION>` : ""}
       </VOUCHER>
     </TALLYMESSAGE>`;
